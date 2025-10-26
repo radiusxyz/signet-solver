@@ -5348,7 +5348,7 @@ dependencies = [
  "once_cell",
  "reqwest",
  "rust_decimal",
- "secp256k1 0.30.0",
+ "secp256k1 0.31.1",
  "serde",
  "serde_json",
  "solver-account",
