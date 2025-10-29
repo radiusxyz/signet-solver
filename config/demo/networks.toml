@@ -73,7 +73,7 @@ input_settler_address = "0x0A4f505364De0Aa46c66b15aBae44eBa12ab0380"
 output_settler_address = "0x0A4f505364De0Aa46c66b15aBae44eBa12ab0380"
 
 [[networks.3151908.rpc_urls]]
-http = "https://rpc.pecorino-host.signet.sh/"  # TODO: Verify actual L1 RPC endpoint
+http = "https://host-rpc.pecorino.signet.sh" # Signet host RPC endpoint
 
 [[networks.3151908.tokens]]
 address = "0x65fb255585458de1f9a246b476aa8d5c5516f6fd"

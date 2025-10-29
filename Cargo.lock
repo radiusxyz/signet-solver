@@ -5204,6 +5204,7 @@ name = "solver-core"
 version = "0.1.0"
 dependencies = [
  "alloy-primitives",
+ "alloy-sol-types",
  "chrono",
  "once_cell",
  "rust_decimal",
@@ -5212,6 +5213,7 @@ dependencies = [
  "solver-account",
  "solver-config",
  "solver-delivery",
+ "solver-dex",
  "solver-discovery",
  "solver-order",
  "solver-pricing",
@@ -5250,10 +5252,25 @@ dependencies = [
  "signet-types",
  "signet-zenith",
  "solver-account",
+ "solver-dex",
  "solver-types",
  "thiserror 1.0.69",
  "tokio",
  "toml",
+ "tracing",
+]
+
+[[package]]
+name = "solver-dex"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "alloy-sol-types",
+ "hex",
+ "serde",
+ "solver-types",
+ "thiserror 1.0.69",
+ "tokio",
  "tracing",
 ]
 

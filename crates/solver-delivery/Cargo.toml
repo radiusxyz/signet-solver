@@ -27,6 +27,7 @@ signet-tx-cache = { git = "https://github.com/init4tech/signet-sdk", branch = "m
 signet-types = { git = "https://github.com/init4tech/signet-sdk", branch = "main" }
 signet-zenith = { git = "https://github.com/init4tech/signet-sdk", branch = "main" }
 solver-account = { path = "../solver-account" }
+solver-dex = { path = "../solver-dex" }
 solver-types = { path = "../solver-types" }
 thiserror = "1.0"
 tokio = { version = "1.0", features = ["rt-multi-thread"] }

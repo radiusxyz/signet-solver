@@ -12,6 +12,7 @@ members = [
     "crates/solver-settlement",
     "crates/solver-pricing",
     "crates/solver-service",
+    "crates/solver-dex",
 ]
 default-members = ["crates/solver-service"]
 

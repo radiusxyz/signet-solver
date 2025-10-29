@@ -6,6 +6,7 @@
 //! and modular design for building solver instances.
 
 pub mod builder;
+pub use solver_dex as dex;
 pub mod engine;
 pub mod handlers;
 pub mod monitoring;

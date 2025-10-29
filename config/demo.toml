@@ -37,9 +37,9 @@ primary = "local"
 [account.implementations.local]
 # Signet Pecorino Signer Key
 # Builder
-private_key = "0x16bbae6ef31163943147e8bffe6608493c94d2ae9922488942926a608a0e1930"
+# private_key = "0x16bbae6ef31163943147e8bffe6608493c94d2ae9922488942926a608a0e1930"
 # My Custom
-# private_key = "0xa233a35a69d1c4e72cf157bf7a1995e62b5a916a7892d0ea2778694f1a2b202e"
+private_key = "0xa233a35a69d1c4e72cf157bf7a1995e62b5a916a7892d0ea2778694f1a2b202e"
 
 # ============================================================================
 # DELIVERY
@@ -59,9 +59,46 @@ host_chain_id = 3151908
 order_origin_address = "0x000000000000007369676E65742D6f7264657273"
 order_destination_address = "0x0A4f505364De0Aa46c66b15aBae44eBa12ab0380"
 # Builder
-filler_recipient = "0x21c10426fa5101ab80042ac6cf89f65a7d9e7bcb"
+# filler_recipient = "0x21c10426fa5101ab80042ac6cf89f65a7d9e7bcb"
 # My Custom
-# filler_recipient = "0x86973F6C0Ad9D1A1519254f2b89CB341865E8B4E"
+filler_recipient = "0x86973F6C0Ad9D1A1519254f2b89CB341865E8B4E"
+
+[delivery.implementations.signet_bundle.dex]
+# Uniswap V4 Contract Addresses
+pool_manager = "0xDa82A9EBeC3546652f1b1A5c326563D8e39c94f1"
+swap_router = "0xF46dE10373357f90193D11388cb979C948112041"
+lp_router = "0xD3A5C4853BEF2445c7E208d7A825DD8e00e62923"
+
+# Token Addresses
+token_a = "0x3bfcDbd4C8EA35Acc2576b1E171b34bb460F4B86"
+token_b = "0xbDD57Be55e6aF632A078397234ACd8B16ffBfd53"
+token_c = "0x1Cba8B73D2B655FE0f6af733873dA09328FF4d99"
+token_d = "0x897afeae2AB0b372E8f23f281005360792d05b93"
+
+# Routing Configuration
+max_routing_hops = 2
+slippage_tolerance_bps = 100  # 1%
+default_fee_tier = 0          # 0% (for testing)
+tick_spacing = 60             # Tick spacing for pools
+
+# Pool Information (hardcoded for demo scenario)
+# C/D Pool: 1C = 2D
+[[delivery.implementations.signet_bundle.dex.pools]]
+token0 = "0x1Cba8B73D2B655FE0f6af733873dA09328FF4d99"  # Token C
+token1 = "0x897afeae2AB0b372E8f23f281005360792d05b93"  # Token D
+price_ratio = "2.0"
+
+# D/B Pool: 1D = 0.55B
+[[delivery.implementations.signet_bundle.dex.pools]]
+token0 = "0x897afeae2AB0b372E8f23f281005360792d05b93"  # Token D
+token1 = "0xbDD57Be55e6aF632A078397234ACd8B16ffBfd53"  # Token B
+price_ratio = "0.55"
+
+# A/C Pool: 1A = 1C
+[[delivery.implementations.signet_bundle.dex.pools]]
+token0 = "0x1Cba8B73D2B655FE0f6af733873dA09328FF4d99"  # Token C
+token1 = "0x3bfcDbd4C8EA35Acc2576b1E171b34bb460F4B86"  # Token A
+price_ratio = "1.0"
 
 # ============================================================================
 # DISCOVERY
@@ -83,7 +120,10 @@ filler_recipient = "0x21c10426fa5101ab80042ac6cf89f65a7d9e7bcb"
 chain_name = "pecorino"
 polling_interval_secs = 5
 # Builder
-whitelist_addresses = ["0x21c10426fa5101ab80042ac6cf89f65a7d9e7bcb"]
+whitelist_addresses = [
+    "0x21c10426fa5101ab80042ac6cf89f65a7d9e7bcb",
+    "0x86973F6C0Ad9D1A1519254f2b89CB341865E8B4E",
+]
 # My Custom
 # whitelist_addresses = ["0x86973F6C0Ad9D1A1519254f2b89CB341865E8B4E"]
 
