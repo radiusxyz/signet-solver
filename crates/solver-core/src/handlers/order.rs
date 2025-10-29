@@ -7,6 +7,7 @@ use crate::engine::event_bus::EventBus;
 use crate::state::OrderStateMachine;
 use alloy_primitives::hex;
 use solver_delivery::DeliveryService;
+use serde_json::json;
 use solver_order::OrderService;
 use solver_storage::StorageService;
 use solver_types::{
@@ -150,10 +151,10 @@ impl OrderHandler {
 				"Handling Signet order execution via bundle delivery"
 			);
 
-			let tx = solver_types::Transaction {
-				chain_id: order
-					.input_chains
-					.first()
+		let tx = solver_types::Transaction {
+			chain_id: order
+				.input_chains
+				.first()
 					.map(|c| c.chain_id)
 					.unwrap_or(14174),
 				to: order
@@ -173,8 +174,10 @@ impl OrderHandler {
 					.priority_fee
 					.and_then(|fee| fee.to::<u128>().try_into().ok()),
 				nonce: None,
-				metadata: Some(order.data.clone()), // Pass SignedOrder data to bundle delivery
-			};
+			metadata: Some(json!({
+				"signed_order": order.data.clone(),
+			})), // Pass SignedOrder data to bundle delivery
+		};
 
 			// Submit via bundle delivery (which will create SignedFill and submit bundle)
 			let tx_hash = self
