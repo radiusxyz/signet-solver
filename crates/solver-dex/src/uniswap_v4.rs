@@ -189,11 +189,8 @@ impl UniswapV4Router {
 		let sqrt_price_limit = if zero_for_one {
 			U160::from(4295128740_u64) // MIN_SQRT_PRICE + 1
 		} else {
-			U160::from_str_radix(
-				"1461446703485210103287273052203988822378723970341",
-				10,
-			)
-			.unwrap_or(U160::MAX)
+			U160::from_str_radix("1461446703485210103287273052203988822378723970341", 10)
+				.unwrap_or(U160::MAX)
 		};
 
 		let swap_params = SwapParams {
@@ -247,10 +244,7 @@ impl UniswapV4Router {
 	/// Creates the calldata for ERC20.approve() to approve the router to spend tokens.
 	pub fn encode_approve(token: &Address, amount: U256) -> Result<Bytes, DexError> {
 		let spender = AlloyAddress::ZERO; // Will be set by caller
-		let call = IERC20::approveCall {
-			spender,
-			amount,
-		};
+		let call = IERC20::approveCall { spender, amount };
 		let calldata = call.abi_encode();
 
 		tracing::debug!(
@@ -319,10 +313,7 @@ mod tests {
 		assert!(calldata.len() > 0);
 		assert!(calldata.len() < 1000); // Reasonable upper bound
 
-		tracing::debug!(
-			"Swap calldata length: {} bytes",
-			calldata.len()
-		);
+		tracing::debug!("Swap calldata length: {} bytes", calldata.len());
 	}
 
 	#[test]

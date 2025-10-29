@@ -202,16 +202,13 @@ impl DexRouter {
 			}
 
 			// Select route with minimum input requirement
-			if best_route.is_none()
-				|| amount_in_with_buffer < best_route.as_ref().unwrap().1
-			{
+			if best_route.is_none() || amount_in_with_buffer < best_route.as_ref().unwrap().1 {
 				best_route = Some((route, amount_in_with_buffer, amount_out));
 			}
 		}
 
-		let (route, amount_in, amount_out) = best_route.ok_or_else(|| {
-			DexError::InsufficientLiquidity
-		})?;
+		let (route, amount_in, amount_out) =
+			best_route.ok_or_else(|| DexError::InsufficientLiquidity)?;
 
 		// Calculate minimum output amount with slippage protection
 		let amount_out_min = self.calculate_min_amount_out(amount_out);
@@ -318,7 +315,8 @@ impl DexRouter {
 			let token_out = &route[i + 1];
 
 			// Find the pool price
-			let price_ratio = self.pool_prices
+			let price_ratio = self
+				.pool_prices
 				.iter()
 				.find(|(t0, t1, _)| {
 					(t0 == token_in && t1 == token_out) || (t0 == token_out && t1 == token_in)
@@ -452,7 +450,7 @@ impl DexRouter {
 				data: approve_calldata.to_vec(),
 				value: U256::ZERO,
 				chain_id,
-				nonce: None, // Will be filled by delivery service
+				nonce: None,              // Will be filled by delivery service
 				gas_limit: Some(100_000), // Standard approve gas limit
 				gas_price: None,
 				max_fee_per_gas: None,
@@ -463,16 +461,19 @@ impl DexRouter {
 			transactions.push(approve_tx);
 
 			// 2. Generate swap transaction
-			let swap_calldata =
-				self.uniswap_router
-					.encode_swap(token_in, token_out, amount_in, quote.amount_out_min)?;
+			let swap_calldata = self.uniswap_router.encode_swap(
+				token_in,
+				token_out,
+				amount_in,
+				quote.amount_out_min,
+			)?;
 
 			let swap_tx = solver_types::Transaction {
 				to: Some(Address(router_address.as_slice().to_vec())),
 				data: swap_calldata.to_vec(),
 				value: U256::ZERO,
 				chain_id,
-				nonce: None, // Will be filled by delivery service
+				nonce: None,              // Will be filled by delivery service
 				gas_limit: Some(500_000), // Higher gas limit for swaps
 				gas_price: None,
 				max_fee_per_gas: None,
@@ -511,8 +512,8 @@ mod tests {
 		let token_b = Address(hex::decode("bDD57Be55e6aF632A078397234ACd8B16ffBfd53").unwrap());
 
 		vec![
-			(token_c.clone(), token_d.clone(), 2.0),  // 1C = 2D
-			(token_d, token_b, 0.55),                  // 1D = 0.55B
+			(token_c.clone(), token_d.clone(), 2.0), // 1C = 2D
+			(token_d, token_b, 0.55),                // 1D = 0.55B
 		]
 	}
 

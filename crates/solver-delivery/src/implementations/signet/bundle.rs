@@ -24,7 +24,7 @@ use signet_tx_cache::client::TxCache;
 use signet_types::SignedFill;
 use solver_dex::{DexRouter, UniswapV4Router};
 use solver_types::{
-	Address, ConfigSchema, Field, FieldType, NetworksConfig, Schema,
+	Address, ConfigSchema, Field, FieldType, NetworksConfig, Schema, SecretString,
 	Transaction as SolverTransaction, TransactionHash, TransactionReceipt,
 };
 use std::collections::{HashMap, HashSet};
@@ -110,6 +110,103 @@ pub struct SignetBundleDelivery {
 }
 
 impl SignetBundleDelivery {
+	pub fn host_chain_id(&self) -> u64 {
+		self.config.host_chain_id
+	}
+
+	pub async fn build_host_swap_transactions(
+		&self,
+		signed_order: &signet_types::SignedOrder,
+	) -> Result<Vec<Bytes>, DeliveryError> {
+		self.prepare_host_swap_transactions(signed_order).await
+	}
+
+	pub fn from_config(
+		config: &toml::Value,
+		networks: &NetworksConfig,
+		default_private_key: &SecretString,
+		network_private_keys: &HashMap<u64, SecretString>,
+	) -> Result<Self, DeliveryError> {
+		SignetBundleDeliverySchema::validate_config(config).map_err(|e| {
+			DeliveryError::Network(format!(
+				"Invalid Signet bundle delivery configuration: {}",
+				e
+			))
+		})?;
+
+		let chain_name = config
+			.get("chain_name")
+			.and_then(|v| v.as_str())
+			.ok_or_else(|| DeliveryError::Network("chain_name is required".to_string()))?
+			.to_string();
+
+		let target_block = config
+			.get("target_block")
+			.and_then(|v| v.as_integer())
+			.map(|v| v as u64);
+
+		let rollup_chain_id = config
+			.get("rollup_chain_id")
+			.and_then(|v| v.as_integer())
+			.ok_or_else(|| DeliveryError::Network("rollup_chain_id is required".to_string()))?
+			as u64;
+
+		let host_chain_id = config
+			.get("host_chain_id")
+			.and_then(|v| v.as_integer())
+			.ok_or_else(|| DeliveryError::Network("host_chain_id is required".to_string()))?
+			as u64;
+
+		let order_origin_address = config
+			.get("order_origin_address")
+			.and_then(|v| v.as_str())
+			.ok_or_else(|| DeliveryError::Network("order_origin_address is required".to_string()))?
+			.parse::<alloy_primitives::Address>()
+			.map_err(|e| DeliveryError::Network(format!("Invalid order_origin_address: {}", e)))?;
+
+		let order_destination_address = config
+			.get("order_destination_address")
+			.and_then(|v| v.as_str())
+			.ok_or_else(|| {
+				DeliveryError::Network("order_destination_address is required".to_string())
+			})?
+			.parse::<alloy_primitives::Address>()
+			.map_err(|e| {
+				DeliveryError::Network(format!("Invalid order_destination_address: {}", e))
+			})?;
+
+		let filler_recipient = config
+			.get("filler_recipient")
+			.and_then(|v| v.as_str())
+			.ok_or_else(|| DeliveryError::Network("filler_recipient is required".to_string()))?
+			.parse::<alloy_primitives::Address>()
+			.map_err(|e| DeliveryError::Network(format!("Invalid filler_recipient: {}", e)))?;
+
+		let dex_config = parse_dex_config(config)?;
+
+		let private_key = network_private_keys
+			.get(&host_chain_id)
+			.unwrap_or(default_private_key);
+
+		let signer = private_key
+			.expose_secret()
+			.parse::<PrivateKeySigner>()
+			.map_err(|e| DeliveryError::Network(format!("Invalid private key: {}", e)))?;
+
+		let delivery_config = SignetBundleConfig {
+			chain_name,
+			target_block,
+			rollup_chain_id,
+			host_chain_id,
+			order_origin_address,
+			order_destination_address,
+			filler_recipient,
+			dex: dex_config.clone(),
+		};
+
+		SignetBundleDelivery::new(delivery_config, networks.clone(), signer, dex_config)
+	}
+
 	/// Helper method to get RPC URL for a given chain ID.
 	fn get_rpc_url(&self, chain_id: u64) -> Result<String, DeliveryError> {
 		let network_config = self.networks.get(&chain_id).ok_or_else(|| {
@@ -192,8 +289,8 @@ impl SignetBundleDelivery {
 					"Failed to deserialize SignedOrder from metadata: {}",
 					e
 				))
-		})?;
-	tracing::info!(
+			})?;
+		tracing::info!(
 			outputs_count = signed_order.outputs.len(),
 			permit_nonce = %signed_order.permit.permit.nonce,
 			"Successfully deserialized SignedOrder"
@@ -584,23 +681,23 @@ impl SignetBundleDelivery {
 				.then_with(|| a.2.amount_in.cmp(&b.2.amount_in))
 		});
 
-	let (selected_label, _balance, selected_quote) = candidate_quotes.first().cloned().unwrap();
-	let selected_hops = selected_quote.route.path.len().saturating_sub(1);
-	let selected_route_tokens: Vec<String> = selected_quote
-		.route
-		.path
-		.iter()
-		.map(|addr| format!("0x{}", hex::encode(&addr.0)))
-		.collect();
+		let (selected_label, _balance, selected_quote) = candidate_quotes.first().cloned().unwrap();
+		let selected_hops = selected_quote.route.path.len().saturating_sub(1);
+		let selected_route_tokens: Vec<String> = selected_quote
+			.route
+			.path
+			.iter()
+			.map(|addr| format!("0x{}", hex::encode(&addr.0)))
+			.collect();
 
-	tracing::info!(
-		selected_input_token = selected_label,
-		required_input = %selected_quote.amount_in,
-		estimated_output = %selected_quote.amount_out,
-		hops = selected_hops,
-		route_tokens = ?selected_route_tokens,
-		"Selected host swap route (TODO: optimize cost/gas heuristics)",
-	);
+		tracing::info!(
+			selected_input_token = selected_label,
+			required_input = %selected_quote.amount_in,
+			estimated_output = %selected_quote.amount_out,
+			hops = selected_hops,
+			route_tokens = ?selected_route_tokens,
+			"Selected host swap route (TODO: optimize cost/gas heuristics)",
+		);
 		// TODO: in future iterations evaluate all candidates to choose the lowest-cost option
 		// using simulated gas estimates and slippage-aware pricing.
 
@@ -919,94 +1016,15 @@ impl DeliveryInterface for SignetBundleDelivery {
 pub fn create_delivery(
 	config: &toml::Value,
 	networks: &NetworksConfig,
-	default_private_key: &solver_types::SecretString,
-	network_private_keys: &std::collections::HashMap<u64, solver_types::SecretString>,
+	default_private_key: &SecretString,
+	network_private_keys: &std::collections::HashMap<u64, SecretString>,
 ) -> Result<Box<dyn DeliveryInterface>, DeliveryError> {
-	// Validate configuration first
-	SignetBundleDeliverySchema::validate_config(config).map_err(|e| {
-		DeliveryError::Network(format!(
-			"Invalid Signet bundle delivery configuration: {}",
-			e
-		))
-	})?;
-
-	// Parse chain_name (required)
-	let chain_name = config
-		.get("chain_name")
-		.and_then(|v| v.as_str())
-		.ok_or_else(|| DeliveryError::Network("chain_name is required".to_string()))?
-		.to_string();
-
-	// Parse target_block (optional)
-	let target_block = config
-		.get("target_block")
-		.and_then(|v| v.as_integer())
-		.map(|v| v as u64);
-
-	// Parse rollup_chain_id (required)
-	let rollup_chain_id = config
-		.get("rollup_chain_id")
-		.and_then(|v| v.as_integer())
-		.ok_or_else(|| DeliveryError::Network("rollup_chain_id is required".to_string()))?
-		as u64;
-
-	// Parse host_chain_id (required)
-	let host_chain_id = config
-		.get("host_chain_id")
-		.and_then(|v| v.as_integer())
-		.ok_or_else(|| DeliveryError::Network("host_chain_id is required".to_string()))?
-		as u64;
-
-	// Parse order_origin_address (required)
-	let order_origin_address = config
-		.get("order_origin_address")
-		.and_then(|v| v.as_str())
-		.ok_or_else(|| DeliveryError::Network("order_origin_address is required".to_string()))?
-		.parse::<alloy_primitives::Address>()
-		.map_err(|e| DeliveryError::Network(format!("Invalid order_origin_address: {}", e)))?;
-
-	// Parse order_destination_address (required)
-	let order_destination_address = config
-		.get("order_destination_address")
-		.and_then(|v| v.as_str())
-		.ok_or_else(|| DeliveryError::Network("order_destination_address is required".to_string()))?
-		.parse::<alloy_primitives::Address>()
-		.map_err(|e| DeliveryError::Network(format!("Invalid order_destination_address: {}", e)))?;
-
-	// Parse filler_recipient (required)
-	let filler_recipient = config
-		.get("filler_recipient")
-		.and_then(|v| v.as_str())
-		.ok_or_else(|| DeliveryError::Network("filler_recipient is required".to_string()))?
-		.parse::<alloy_primitives::Address>()
-		.map_err(|e| DeliveryError::Network(format!("Invalid filler_recipient: {}", e)))?;
-
-	// Create signer from private key
-	// Use host chain specific key if available, otherwise use default
-	let private_key = network_private_keys
-		.get(&host_chain_id)
-		.unwrap_or(default_private_key);
-
-	let signer = private_key
-		.expose_secret()
-		.parse::<PrivateKeySigner>()
-		.map_err(|e| DeliveryError::Network(format!("Invalid private key: {}", e)))?;
-
-	let dex_config = parse_dex_config(config)?;
-
-	let delivery_config = SignetBundleConfig {
-		chain_name,
-		target_block,
-		rollup_chain_id,
-		host_chain_id,
-		order_origin_address,
-		order_destination_address,
-		filler_recipient,
-		dex: dex_config.clone(),
-	};
-
-	let delivery =
-		SignetBundleDelivery::new(delivery_config, networks.clone(), signer, dex_config)?;
+	let delivery = SignetBundleDelivery::from_config(
+		config,
+		networks,
+		default_private_key,
+		network_private_keys,
+	)?;
 	Ok(Box::new(delivery))
 }
 

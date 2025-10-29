@@ -13,6 +13,7 @@ members = [
     "crates/solver-pricing",
     "crates/solver-service",
     "crates/solver-dex",
+    "examples/signet-host-txs",
 ]
 default-members = ["crates/solver-service"]
 
