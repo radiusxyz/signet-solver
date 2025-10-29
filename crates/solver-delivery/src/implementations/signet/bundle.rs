@@ -13,19 +13,21 @@
 
 use crate::{DeliveryError, DeliveryInterface};
 use alloy_eips::eip2718::Encodable2718;
-use alloy_network::EthereumWallet;
-use alloy_primitives::Bytes;
+use alloy_network::{AnyNetwork, EthereumWallet};
+use alloy_primitives::{hex, Address as AlloyAddress, Bytes, U256};
 use alloy_provider::{Provider, ProviderBuilder};
-use alloy_rpc_types::mev::EthSendBundle;
+use alloy_rpc_types::{mev::EthSendBundle, TransactionRequest};
 use alloy_signer_local::PrivateKeySigner;
 use async_trait::async_trait;
 use signet_bundle::SignetEthBundle;
 use signet_tx_cache::client::TxCache;
 use signet_types::SignedFill;
+use solver_dex::{DexRouter, UniswapV4Router};
 use solver_types::{
-	ConfigSchema, Field, FieldType, NetworksConfig, Schema, Transaction as SolverTransaction,
-	TransactionHash, TransactionReceipt,
+	Address, ConfigSchema, Field, FieldType, NetworksConfig, Schema,
+	Transaction as SolverTransaction, TransactionHash, TransactionReceipt,
 };
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::time::{sleep, Duration};
 
@@ -37,6 +39,37 @@ const DEFAULT_GAS_LIMIT: u64 = 1_000_000;
 const DEFAULT_PRIORITY_FEE_MULTIPLIER: u64 = 16;
 /// Multiplier for converting gwei to wei.
 const GWEI_TO_WEI: u64 = 1_000_000_000;
+
+/// Pool configuration entry loaded from configuration.
+#[derive(Debug, Clone)]
+pub struct DexPoolConfig {
+	pub token0: alloy_primitives::Address,
+	pub token1: alloy_primitives::Address,
+	pub price_ratio: f64,
+}
+
+/// DEX configuration required for host-chain swaps.
+#[derive(Debug, Clone)]
+pub struct DexConfig {
+	pub pool_manager: alloy_primitives::Address,
+	pub swap_router: alloy_primitives::Address,
+	pub lp_router: alloy_primitives::Address,
+	pub max_routing_hops: usize,
+	pub slippage_tolerance_bps: u16,
+	pub default_fee_tier: u32,
+	pub tick_spacing: i32,
+	/// Known token addresses indexed by symbolic name (e.g. token_a, token_b, ...)
+	pub tokens: HashMap<String, alloy_primitives::Address>,
+	pub pools: Vec<DexPoolConfig>,
+}
+
+fn alloy_to_solver_address(address: &AlloyAddress) -> Address {
+	Address(address.as_slice().to_vec())
+}
+
+fn format_alloy_address(address: &AlloyAddress) -> String {
+	format!("0x{}", hex::encode(address.as_slice()))
+}
 
 /// Signet bundle delivery implementation configuration.
 #[derive(Debug, Clone)]
@@ -55,6 +88,8 @@ pub struct SignetBundleConfig {
 	pub order_destination_address: alloy_primitives::Address,
 	/// Address where filler receives input tokens
 	pub filler_recipient: alloy_primitives::Address,
+	/// Optional DEX configuration for host-chain swaps
+	pub dex: Option<DexConfig>,
 }
 
 /// Signet bundle delivery implementation.
@@ -70,6 +105,8 @@ pub struct SignetBundleDelivery {
 	cache_client: Arc<TxCache>,
 	/// Solver's signer for creating SignedFills
 	signer: PrivateKeySigner,
+	/// Optional DEX configuration for constructing host chain swap transactions
+	dex_config: Option<DexConfig>,
 }
 
 impl SignetBundleDelivery {
@@ -94,6 +131,7 @@ impl SignetBundleDelivery {
 		config: SignetBundleConfig,
 		networks: NetworksConfig,
 		signer: PrivateKeySigner,
+		dex_config: Option<DexConfig>,
 	) -> Result<Self, DeliveryError> {
 		// Validate chain name
 		if config.chain_name.is_empty() {
@@ -118,6 +156,7 @@ impl SignetBundleDelivery {
 			networks,
 			cache_client: Arc::new(cache_client),
 			signer,
+			dex_config,
 		})
 	}
 
@@ -132,28 +171,33 @@ impl SignetBundleDelivery {
 		// --- (1) SignedOrder 및 L2 Initiate Tx 생성 로직은 하나만 수행
 
 		// Extract SignedOrder from transaction metadata
-		let signed_order = if let Some(metadata) = &tx.metadata {
-			// ... (SignedOrder Deserialization 로직 유지)
-			tracing::debug!("Deserializing SignedOrder from transaction metadata");
-			let signed_order = serde_json::from_value::<signet_types::SignedOrder>(
-				metadata.clone(),
+		let metadata_value = tx.metadata.clone().ok_or_else(|| {
+			DeliveryError::Network(
+				"No SignedOrder metadata in transaction for Signet bundle".to_string(),
 			)
+		})?;
+
+		let signed_order_value = match &metadata_value {
+			serde_json::Value::Object(obj) => obj
+				.get("signed_order")
+				.cloned()
+				.unwrap_or(metadata_value.clone()),
+			_ => metadata_value.clone(),
+		};
+
+		tracing::debug!("Deserializing SignedOrder from transaction metadata");
+		let signed_order = serde_json::from_value::<signet_types::SignedOrder>(signed_order_value)
 			.map_err(|e| {
 				DeliveryError::Network(format!(
 					"Failed to deserialize SignedOrder from metadata: {}",
 					e
 				))
-			})?;
-			tracing::info!(
-				outputs_count = signed_order.outputs.len(),
-				"Successfully deserialized SignedOrder"
-			);
-			signed_order
-		} else {
-			return Err(DeliveryError::Network(
-				"No SignedOrder metadata in transaction for Signet bundle".to_string(),
-			));
-		};
+		})?;
+	tracing::info!(
+			outputs_count = signed_order.outputs.len(),
+			permit_nonce = %signed_order.permit.permit.nonce,
+			"Successfully deserialized SignedOrder"
+		);
 
 		// Get current rollup block number
 		let current_block = self.get_block_number(self.config.rollup_chain_id).await?;
@@ -179,7 +223,9 @@ impl SignetBundleDelivery {
 		rollup_tx_requests.push(initiate_tx_request);
 
 		// Sign and encode all transactions together (ensures correct nonce ordering)
-		let rollup_txs = self.sign_and_encode_txns(rollup_tx_requests).await?;
+		let rollup_txs = self
+			.sign_and_encode_txns(rollup_tx_requests, self.config.rollup_chain_id)
+			.await?;
 
 		tracing::info!(
 			rollup_txs_count = rollup_txs.len(),
@@ -188,6 +234,13 @@ impl SignetBundleDelivery {
 
 		// Get host chain fill (this goes in host_fills field, not in rollup txs)
 		let host_fills = signed_fills.get(&self.config.host_chain_id).cloned();
+		let host_swap_txs = self.prepare_host_swap_transactions(&signed_order).await?;
+
+		tracing::info!(
+			host_swap_txs_count = host_swap_txs.len(),
+			has_host_fills = host_fills.is_some(),
+			"Prepared host-chain auxiliary swap transactions"
+		);
 
 		// --- (2) Target Block Number만 변경하며 10개의 Bundle 생성
 
@@ -217,11 +270,11 @@ impl SignetBundleDelivery {
 					..Default::default()
 				},
 				host_fills: host_fills.clone(), // Host chain fill
-				host_txs: vec![],
+				host_txs: host_swap_txs.clone(),
 			};
 			bundles.push(bundle);
 		}
-
+		tracing::info!("Created bundles: {:?}", bundles[0]);
 		Ok(bundles)
 	}
 
@@ -236,32 +289,45 @@ impl SignetBundleDelivery {
 	/// transactions sequentially with the same provider instance.
 	async fn sign_and_encode_txns(
 		&self,
-		tx_requests: Vec<alloy_rpc_types::TransactionRequest>,
+		tx_requests: Vec<TransactionRequest>,
+		chain_id: u64,
 	) -> Result<Vec<Bytes>, DeliveryError> {
-		// Get RPC URL for rollup chain
-		let rpc_url = self.get_rpc_url(self.config.rollup_chain_id)?;
+		// Get RPC URL for target chain
+		let rpc_url = self.get_rpc_url(chain_id)?;
 
 		// Create provider with wallet (needed for fill method)
 		// IMPORTANT: Use the same provider for all transactions to ensure correct nonce ordering
 		let wallet = EthereumWallet::from(self.signer.clone());
 		let provider = ProviderBuilder::new().wallet(wallet).connect_http(
-			rpc_url.parse().map_err(|e| {
-				DeliveryError::Network(format!("Invalid RPC URL: {}", e))
-			})?,
+			rpc_url
+				.parse()
+				.map_err(|e| DeliveryError::Network(format!("Invalid RPC URL: {}", e)))?,
 		);
 
 		let mut encoded_txs = Vec::new();
+		let signer_address = self.signer.address();
+		let mut next_nonce = provider
+			.get_transaction_count(signer_address)
+			.await
+			.map_err(|e| DeliveryError::Network(format!("Failed to fetch nonce: {}", e)))?;
 
 		// Process each transaction sequentially to ensure correct nonce ordering
 		for mut tx in tx_requests {
 			// Fill out the transaction fields (following SDK pattern)
 			use alloy_network::TransactionBuilder;
 			tx = tx
-				.with_from(self.signer.address())
+				.with_from(signer_address)
+				.with_nonce(next_nonce)
 				.with_gas_limit(DEFAULT_GAS_LIMIT)
 				.with_max_priority_fee_per_gas(
 					(GWEI_TO_WEI * DEFAULT_PRIORITY_FEE_MULTIPLIER) as u128,
 				);
+			tracing::debug!(
+				assigned_chain = chain_id,
+				assigned_nonce = next_nonce,
+				"Assigned nonce for transaction prior to signing"
+			);
+			next_nonce = next_nonce.saturating_add(1);
 
 			// Use provider.fill() to populate remaining fields (nonce, gas price, chain_id, etc.)
 			use alloy_provider::SendableTx;
@@ -284,6 +350,271 @@ impl SignetBundleDelivery {
 		}
 
 		Ok(encoded_txs)
+	}
+
+	async fn get_erc20_balance(
+		&self,
+		chain_id: u64,
+		owner: &AlloyAddress,
+		token: &AlloyAddress,
+	) -> Result<U256, DeliveryError> {
+		let rpc_url = self.get_rpc_url(chain_id)?;
+		let url = rpc_url
+			.parse::<reqwest::Url>()
+			.map_err(|e| DeliveryError::Network(format!("Invalid RPC URL: {}", e)))?;
+
+		let provider = ProviderBuilder::new()
+			.network::<AnyNetwork>()
+			.connect_http(url);
+
+		let mut call_data = Vec::with_capacity(36);
+		call_data.extend_from_slice(&[0x70, 0xa0, 0x82, 0x31]);
+		call_data.extend_from_slice(&[0; 12]);
+		call_data.extend_from_slice(owner.as_slice());
+
+		let result = provider
+			.call(
+				TransactionRequest::default()
+					.to(*token)
+					.input(call_data.into())
+					.into(),
+			)
+			.await
+			.map_err(|e| DeliveryError::Network(format!("Failed to call balanceOf: {}", e)))?;
+
+		if result.len() < 32 {
+			return Err(DeliveryError::Network(
+				"Invalid balanceOf response".to_string(),
+			));
+		}
+
+		Ok(U256::from_be_slice(&result[..32]))
+	}
+
+	async fn prepare_host_swap_transactions(
+		&self,
+		signed_order: &signet_types::SignedOrder,
+	) -> Result<Vec<Bytes>, DeliveryError> {
+		let dex_config = match &self.dex_config {
+			Some(config) => config,
+			None => {
+				tracing::debug!("No DEX configuration present; skipping host swap generation");
+				return Ok(Vec::new());
+			},
+		};
+
+		let host_outputs: Vec<_> = signed_order
+			.outputs
+			.iter()
+			.filter(|output| output.chainId as u64 == self.config.host_chain_id)
+			.collect();
+
+		if host_outputs.is_empty() {
+			tracing::debug!("SignedOrder has no host-chain outputs; skipping host swap generation");
+			return Ok(Vec::new());
+		}
+
+		let host_output_summaries: Vec<String> = host_outputs
+			.iter()
+			.map(|output| {
+				format!(
+					"token={} amount={} recipient={}",
+					format_alloy_address(&output.token),
+					output.amount,
+					format_alloy_address(&output.recipient)
+				)
+			})
+			.collect();
+
+		tracing::info!(
+			host_outputs = ?host_output_summaries,
+			"Identified host-chain outputs requiring settlement"
+		);
+
+		let primary_output = host_outputs[0];
+		let mut required_amount = primary_output.amount;
+		for output in host_outputs.iter().skip(1) {
+			if output.token == primary_output.token {
+				required_amount = required_amount.saturating_add(output.amount);
+			}
+		}
+
+		let target_token = primary_output.token;
+		let owner = self.signer.address();
+
+		let current_balance = self
+			.get_erc20_balance(self.config.host_chain_id, &owner, &target_token)
+			.await?;
+
+		tracing::info!(
+			target_token = %format_alloy_address(&target_token),
+			current_balance = %current_balance,
+			required_amount = %required_amount,
+			"Current host-chain balance snapshot for target token"
+		);
+
+		if current_balance >= required_amount {
+			tracing::info!(
+				target_token = %format_alloy_address(&target_token),
+				required_amount = %required_amount,
+				current_balance = %current_balance,
+				"Target token balance already sufficient; skipping host swap",
+			);
+			return Ok(Vec::new());
+		}
+
+		let amount_needed = required_amount.saturating_sub(current_balance);
+
+		tracing::info!(
+			target_token = %format_alloy_address(&target_token),
+			amount_needed = %amount_needed,
+			"Preparing host-chain swap transactions",
+		);
+
+		let pool_prices: Vec<(Address, Address, f64)> = dex_config
+			.pools
+			.iter()
+			.map(|pool| {
+				(
+					alloy_to_solver_address(&pool.token0),
+					alloy_to_solver_address(&pool.token1),
+					pool.price_ratio,
+				)
+			})
+			.collect();
+
+		let uniswap_router = UniswapV4Router::new(
+			dex_config.swap_router,
+			self.config.host_chain_id,
+			dex_config.default_fee_tier,
+		);
+
+		let router = DexRouter::new(
+			uniswap_router,
+			dex_config.max_routing_hops,
+			dex_config.slippage_tolerance_bps,
+			pool_prices,
+		);
+
+		let mut candidate_quotes = Vec::new();
+		for (token_label, token_address) in &dex_config.tokens {
+			if *token_address == target_token {
+				continue;
+			}
+
+			let balance = self
+				.get_erc20_balance(self.config.host_chain_id, &owner, token_address)
+				.await?;
+
+			tracing::info!(
+				candidate_token = token_label,
+				token_address = %format_alloy_address(token_address),
+				available_balance = %balance,
+				"Inventory snapshot for potential swap input token"
+			);
+
+			if balance.is_zero() {
+				tracing::debug!(
+					candidate_token = token_label,
+					"Skipping candidate token due to zero balance"
+				);
+				continue;
+			}
+
+			let token_in = alloy_to_solver_address(token_address);
+			let token_out = alloy_to_solver_address(&target_token);
+
+			match router
+				.find_best_route(&token_in, &token_out, amount_needed)
+				.await
+			{
+				Ok(quote) => {
+					if quote.amount_in <= balance {
+						let hop_count = quote.route.path.len().saturating_sub(1);
+						let route_tokens: Vec<String> = quote
+							.route
+							.path
+							.iter()
+							.map(|addr| format!("0x{}", hex::encode(&addr.0)))
+							.collect();
+						tracing::debug!(
+							candidate_token = token_label,
+							required_input = %quote.amount_in,
+							estimated_output = %quote.amount_out,
+							hops = hop_count,
+							route_tokens = ?route_tokens,
+							"Found viable host swap candidate",
+						);
+						candidate_quotes.push((token_label.clone(), balance, quote));
+					} else {
+						tracing::debug!(
+							candidate_token = token_label,
+							required_input = %quote.amount_in,
+							available_balance = %balance,
+							"Skipping candidate route due to insufficient balance",
+						);
+					}
+				},
+				Err(err) => {
+					tracing::debug!(
+						candidate_token = token_label,
+						error = %err,
+						"Failed to derive swap route for candidate token",
+					);
+				},
+			}
+		}
+
+		if candidate_quotes.is_empty() {
+			tracing::error!(
+				required_amount = %required_amount,
+				target_token = %format_alloy_address(&target_token),
+				"Unable to identify any viable swap route to source host token"
+			);
+			return Err(DeliveryError::Network(
+				"No viable DEX route available to source host chain token".to_string(),
+			));
+		}
+
+		candidate_quotes.sort_by(|a, b| {
+			let a_hops = a.2.route.path.len();
+			let b_hops = b.2.route.path.len();
+			a_hops
+				.cmp(&b_hops)
+				.then_with(|| a.2.amount_in.cmp(&b.2.amount_in))
+		});
+
+	let (selected_label, _balance, selected_quote) = candidate_quotes.first().cloned().unwrap();
+	let selected_hops = selected_quote.route.path.len().saturating_sub(1);
+	let selected_route_tokens: Vec<String> = selected_quote
+		.route
+		.path
+		.iter()
+		.map(|addr| format!("0x{}", hex::encode(&addr.0)))
+		.collect();
+
+	tracing::info!(
+		selected_input_token = selected_label,
+		required_input = %selected_quote.amount_in,
+		estimated_output = %selected_quote.amount_out,
+		hops = selected_hops,
+		route_tokens = ?selected_route_tokens,
+		"Selected host swap route (TODO: optimize cost/gas heuristics)",
+	);
+		// TODO: in future iterations evaluate all candidates to choose the lowest-cost option
+		// using simulated gas estimates and slippage-aware pricing.
+
+		let swap_transactions = router
+			.generate_swap_transactions(&selected_quote, self.config.host_chain_id)
+			.map_err(|e| {
+				DeliveryError::Network(format!("Failed to generate swap transactions: {}", e))
+			})?;
+
+		let tx_requests: Vec<TransactionRequest> =
+			swap_transactions.into_iter().map(|tx| tx.into()).collect();
+
+		self.sign_and_encode_txns(tx_requests, self.config.host_chain_id)
+			.await
 	}
 
 	/// Creates SignedFills for all target chains from the order's outputs.
@@ -661,6 +992,8 @@ pub fn create_delivery(
 		.parse::<PrivateKeySigner>()
 		.map_err(|e| DeliveryError::Network(format!("Invalid private key: {}", e)))?;
 
+	let dex_config = parse_dex_config(config)?;
+
 	let delivery_config = SignetBundleConfig {
 		chain_name,
 		target_block,
@@ -669,10 +1002,143 @@ pub fn create_delivery(
 		order_origin_address,
 		order_destination_address,
 		filler_recipient,
+		dex: dex_config.clone(),
 	};
 
-	let delivery = SignetBundleDelivery::new(delivery_config, networks.clone(), signer)?;
+	let delivery =
+		SignetBundleDelivery::new(delivery_config, networks.clone(), signer, dex_config)?;
 	Ok(Box::new(delivery))
+}
+
+/// Extracts optional DEX configuration from the delivery configuration.
+fn parse_dex_config(config: &toml::Value) -> Result<Option<DexConfig>, DeliveryError> {
+	let dex_value = match config.get("dex") {
+		Some(value) => value,
+		None => return Ok(None),
+	};
+
+	let pool_manager = dex_value
+		.get("pool_manager")
+		.and_then(|v| v.as_str())
+		.ok_or_else(|| DeliveryError::Network("dex.pool_manager is required".to_string()))?
+		.parse::<alloy_primitives::Address>()
+		.map_err(|e| DeliveryError::Network(format!("Invalid dex.pool_manager: {}", e)))?;
+
+	let swap_router = dex_value
+		.get("swap_router")
+		.and_then(|v| v.as_str())
+		.ok_or_else(|| DeliveryError::Network("dex.swap_router is required".to_string()))?
+		.parse::<alloy_primitives::Address>()
+		.map_err(|e| DeliveryError::Network(format!("Invalid dex.swap_router: {}", e)))?;
+
+	let lp_router = dex_value
+		.get("lp_router")
+		.and_then(|v| v.as_str())
+		.ok_or_else(|| DeliveryError::Network("dex.lp_router is required".to_string()))?
+		.parse::<alloy_primitives::Address>()
+		.map_err(|e| DeliveryError::Network(format!("Invalid dex.lp_router: {}", e)))?;
+
+	let max_routing_hops = dex_value
+		.get("max_routing_hops")
+		.and_then(|v| v.as_integer())
+		.unwrap_or(2);
+
+	let slippage_tolerance_bps = dex_value
+		.get("slippage_tolerance_bps")
+		.and_then(|v| v.as_integer())
+		.unwrap_or(100);
+
+	let default_fee_tier = dex_value
+		.get("default_fee_tier")
+		.and_then(|v| v.as_integer())
+		.unwrap_or(0);
+
+	let tick_spacing = dex_value
+		.get("tick_spacing")
+		.and_then(|v| v.as_integer())
+		.unwrap_or(60);
+
+	let mut tokens = HashMap::new();
+	if let Some(table) = dex_value.as_table() {
+		for (key, value) in table {
+			if !key.starts_with("token_") {
+				continue;
+			}
+
+			let addr_str = value.as_str().ok_or_else(|| {
+				DeliveryError::Network(format!("dex.{} must be a string address", key))
+			})?;
+
+			let address = addr_str.parse::<alloy_primitives::Address>().map_err(|e| {
+				DeliveryError::Network(format!("Invalid address for dex.{}: {}", key, e))
+			})?;
+
+			tokens.insert(key.clone(), address);
+		}
+	}
+
+	let pools_value = dex_value
+		.get("pools")
+		.and_then(|v| v.as_array())
+		.ok_or_else(|| DeliveryError::Network("dex.pools array is required".to_string()))?;
+
+	let mut pools = Vec::new();
+	for pool_entry in pools_value {
+		let token0 = pool_entry
+			.get("token0")
+			.and_then(|v| v.as_str())
+			.ok_or_else(|| DeliveryError::Network("dex.pools[].token0 is required".to_string()))?;
+		let token1 = pool_entry
+			.get("token1")
+			.and_then(|v| v.as_str())
+			.ok_or_else(|| DeliveryError::Network("dex.pools[].token1 is required".to_string()))?;
+		let price_ratio = pool_entry
+			.get("price_ratio")
+			.and_then(|v| v.as_str())
+			.ok_or_else(|| {
+				DeliveryError::Network("dex.pools[].price_ratio is required".to_string())
+			})?
+			.parse::<f64>()
+			.map_err(|e| DeliveryError::Network(format!("Invalid price_ratio: {}", e)))?;
+
+		let token0_addr = token0
+			.parse::<alloy_primitives::Address>()
+			.map_err(|e| DeliveryError::Network(format!("Invalid token0 in pool: {}", e)))?;
+		let token1_addr = token1
+			.parse::<alloy_primitives::Address>()
+			.map_err(|e| DeliveryError::Network(format!("Invalid token1 in pool: {}", e)))?;
+
+		pools.push(DexPoolConfig {
+			token0: token0_addr,
+			token1: token1_addr,
+			price_ratio,
+		});
+	}
+
+	// Ensure tokens covers all addresses present in pools
+	let mut referenced_tokens = HashSet::new();
+	for pool in &pools {
+		referenced_tokens.insert(pool.token0);
+		referenced_tokens.insert(pool.token1);
+	}
+	for address in referenced_tokens {
+		if !tokens.values().any(|existing| *existing == address) {
+			let key = format!("token_{}", hex::encode(address.as_slice()));
+			tokens.insert(key, address);
+		}
+	}
+
+	Ok(Some(DexConfig {
+		pool_manager,
+		swap_router,
+		lp_router,
+		max_routing_hops: max_routing_hops as usize,
+		slippage_tolerance_bps: slippage_tolerance_bps as u16,
+		default_fee_tier: default_fee_tier as u32,
+		tick_spacing: tick_spacing as i32,
+		tokens,
+		pools,
+	}))
 }
 
 /// Registry for the Signet bundle delivery implementation.
