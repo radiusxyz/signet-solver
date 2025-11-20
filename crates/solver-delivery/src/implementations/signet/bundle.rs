@@ -20,6 +20,9 @@ use alloy_rpc_types::{mev::EthSendBundle, TransactionRequest};
 use alloy_signer_local::PrivateKeySigner;
 use async_trait::async_trait;
 use signet_bundle::SignetEthBundle;
+use signet_constants::{
+	HostConstants, HostTokens, RollupConstants, RollupTokens, SignetSystemConstants, UsdRecords,
+};
 use signet_tx_cache::client::TxCache;
 use signet_types::SignedFill;
 use solver_dex::{DexRouter, UniswapV4Router};
@@ -118,7 +121,8 @@ impl SignetBundleDelivery {
 		&self,
 		signed_order: &signet_types::SignedOrder,
 	) -> Result<Vec<Bytes>, DeliveryError> {
-		self.prepare_host_swap_transactions(signed_order).await
+		let tx_requests = self.prepare_host_swap_transactions(signed_order).await?;
+		self.sign_and_encode_txns(tx_requests, self.config.host_chain_id).await
 	}
 
 	pub fn from_config(
@@ -291,8 +295,8 @@ impl SignetBundleDelivery {
 				))
 			})?;
 		tracing::info!(
-			outputs_count = signed_order.outputs.len(),
-			permit_nonce = %signed_order.permit.permit.nonce,
+			outputs_count = signed_order.outputs().len(),
+			permit_nonce = %signed_order.permit().permit.nonce,
 			"Successfully deserialized SignedOrder"
 		);
 
@@ -329,14 +333,23 @@ impl SignetBundleDelivery {
 			"Created rollup transactions (fill + initiate)"
 		);
 
-		// Get host chain fill (this goes in host_fills field, not in rollup txs)
-		let host_fills = signed_fills.get(&self.config.host_chain_id).cloned();
-		let host_swap_txs = self.prepare_host_swap_transactions(&signed_order).await?;
+		// Build host transaction requests: swaps first, then host fill, so inventory is provisioned before fill runs.
+		let host_swap_requests = self.prepare_host_swap_transactions(&signed_order).await?;
+		let mut host_tx_requests = host_swap_requests;
+		if let Some(host_fill) = signed_fills.get(&self.config.host_chain_id) {
+			let fill_tx_request = host_fill.to_fill_tx(self.config.order_destination_address);
+			host_tx_requests.push(fill_tx_request);
+		}
+
+		// Sign & encode host transactions in a single call to ensure contiguous nonces
+		let host_txns = self
+			.sign_and_encode_txns(host_tx_requests.clone(), self.config.host_chain_id)
+			.await?;
 
 		tracing::info!(
-			host_swap_txs_count = host_swap_txs.len(),
-			has_host_fills = host_fills.is_some(),
-			"Prepared host-chain auxiliary swap transactions"
+			host_txns_count = host_txns.len(),
+			host_swap_txs_count = host_tx_requests.len().saturating_sub(1),
+			"Prepared host-chain transactions"
 		);
 
 		// --- (2) Target Block Number만 변경하며 10개의 Bundle 생성
@@ -351,7 +364,7 @@ impl SignetBundleDelivery {
 				current_block = current_block,
 				target_block = target_block,
 				i = i,
-				has_host_fills = host_fills.is_some(),
+				host_txns_count = host_txns.len(),
 				rollup_txs_count = rollup_txs.len(),
 				"Creating bundle for target block"
 			);
@@ -366,8 +379,7 @@ impl SignetBundleDelivery {
 					replacement_uuid: None,
 					..Default::default()
 				},
-				host_fills: host_fills.clone(), // Host chain fill
-				host_txs: host_swap_txs.clone(),
+				host_txs: host_txns.clone(),
 			};
 			bundles.push(bundle);
 		}
@@ -437,7 +449,7 @@ impl SignetBundleDelivery {
 				_ => {
 					return Err(DeliveryError::Network(
 						"Expected transaction envelope from provider.fill()".to_string(),
-					))
+					));
 				},
 			};
 
@@ -491,7 +503,7 @@ impl SignetBundleDelivery {
 	async fn prepare_host_swap_transactions(
 		&self,
 		signed_order: &signet_types::SignedOrder,
-	) -> Result<Vec<Bytes>, DeliveryError> {
+	) -> Result<Vec<TransactionRequest>, DeliveryError> {
 		let dex_config = match &self.dex_config {
 			Some(config) => config,
 			None => {
@@ -501,7 +513,7 @@ impl SignetBundleDelivery {
 		};
 
 		let host_outputs: Vec<_> = signed_order
-			.outputs
+			.outputs()
 			.iter()
 			.filter(|output| output.chainId as u64 == self.config.host_chain_id)
 			.collect();
@@ -710,8 +722,7 @@ impl SignetBundleDelivery {
 		let tx_requests: Vec<TransactionRequest> =
 			swap_transactions.into_iter().map(|tx| tx.into()).collect();
 
-		self.sign_and_encode_txns(tx_requests, self.config.host_chain_id)
-			.await
+		Ok(tx_requests)
 	}
 
 	/// Creates SignedFills for all target chains from the order's outputs.
@@ -727,7 +738,7 @@ impl SignetBundleDelivery {
 	) -> Result<std::collections::HashMap<u64, SignedFill>, DeliveryError> {
 		// Get deadline from the order's permit
 		let deadline = signed_order
-			.permit
+			.permit()
 			.permit
 			.deadline
 			.to_string()
@@ -736,13 +747,9 @@ impl SignetBundleDelivery {
 				DeliveryError::Network(format!("Invalid deadline in order permit: {}", e))
 			})?;
 
-		// 1. Create AggregateOrders from the SignedOrder
-		let mut agg_orders = signet_types::AggregateOrders::new();
-		agg_orders.ingest_signed(signed_order);
-
 		// Get all target chain IDs from the order
 		let target_chain_ids: std::collections::HashSet<u64> = signed_order
-			.outputs
+			.outputs()
 			.iter()
 			.map(|output| output.chainId as u64)
 			.collect();
@@ -755,28 +762,41 @@ impl SignetBundleDelivery {
 			"Creating SignedFills for all target chains"
 		);
 
-		// 2. Create UnsignedFill with deadline and rollup chain ID
-		let mut unsigned_fill = signet_types::UnsignedFill::new(&agg_orders)
-			.with_deadline(deadline)
-			.with_ru_chain_id(self.config.rollup_chain_id);
+		// 2. Create UnsignedFill with deadline and rollup/host chain config
+		let mut unsigned_fill = signet_types::UnsignedFill::new()
+			.fill(signed_order)
+			.with_deadline(deadline);
+
+		let host_tokens = HostTokens::new(UsdRecords::new(), AlloyAddress::ZERO, AlloyAddress::ZERO);
+		let host_constants = HostConstants::new(
+			self.config.host_chain_id,
+			0,
+			self.config.order_destination_address,
+			self.config.order_destination_address,
+			self.config.order_destination_address,
+			self.config.order_destination_address,
+			host_tokens,
+		);
+		let rollup_tokens = RollupTokens::new(AlloyAddress::ZERO, AlloyAddress::ZERO);
+		let rollup_constants = RollupConstants::new(
+			self.config.rollup_chain_id,
+			self.config.order_origin_address,
+			self.config.order_origin_address,
+			AlloyAddress::ZERO,
+			rollup_tokens,
+		);
+
+		let chain_constants = SignetSystemConstants::new(host_constants, rollup_constants);
+		unsigned_fill = unsigned_fill.with_chain(chain_constants);
 
 		// 3. Configure with order contract addresses for each chain
 		for chain_id in &target_chain_ids {
-			let order_address = if *chain_id == self.config.rollup_chain_id {
-				self.config.order_origin_address
-			} else if *chain_id == self.config.host_chain_id {
-				self.config.order_destination_address
-			} else {
-				// For other chains, we need to look up the address
-				// For now, we'll skip them
+			if *chain_id != self.config.rollup_chain_id && *chain_id != self.config.host_chain_id {
 				tracing::warn!(
 					chain_id = chain_id,
 					"No order contract address configured for chain"
 				);
-				continue;
-			};
-
-			unsigned_fill = unsigned_fill.with_chain(*chain_id, order_address.into());
+			}
 		}
 
 		// 4. Sign the fill, producing SignedFills for each target chain
@@ -871,7 +891,7 @@ impl DeliveryInterface for SignetBundleDelivery {
 				attempt = i + 1,
 				block_number = block_number,
 				txs_count = bundle.bundle.txs.len(),
-				has_host_fills = bundle.host_fills.is_some(),
+				host_txns_count = bundle.host_txs.len(),
 				"Submitting bundle to Signet cache"
 			);
 

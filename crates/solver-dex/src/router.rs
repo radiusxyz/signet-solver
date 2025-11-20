@@ -210,8 +210,10 @@ impl DexRouter {
 		let (route, amount_in, amount_out) =
 			best_route.ok_or_else(|| DexError::InsufficientLiquidity)?;
 
-		// Calculate minimum output amount with slippage protection
-		let amount_out_min = self.calculate_min_amount_out(amount_out);
+		// Calculate minimum output amount with slippage protection and ensure it
+		// never drops below the required output (so host fill won't underfund).
+		let amount_out_min =
+			self.calculate_min_amount_out(amount_out).max(amount_out_needed);
 
 		// Estimate gas based on route length
 		let estimated_gas = self.estimate_swap_gas(route.len() - 1);

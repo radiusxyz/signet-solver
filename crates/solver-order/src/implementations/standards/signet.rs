@@ -126,7 +126,7 @@ impl OrderInterface for SignetOrderImpl {
 
 		// Get destination chain from first output
 		let dest_chain_id = signed_order
-			.outputs
+			.outputs()
 			.first()
 			.map(|o| o.chainId as u64)
 			.unwrap_or(rollup_chain_id);

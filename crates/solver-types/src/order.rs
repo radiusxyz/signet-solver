@@ -409,7 +409,7 @@ impl OrderParsable for SignetOrderData {
 	fn parse_available_inputs(&self) -> Vec<AvailableInput> {
 		// Parse inputs from the permit batch
 		// Note: Permit2Batch structure: permit contains the token details
-		let permitted = &self.signed_order.permit.permit.permitted;
+		let permitted = &self.signed_order.permit().permit.permitted;
 
 		permitted
 			.iter()
@@ -420,7 +420,7 @@ impl OrderParsable for SignetOrderData {
 				);
 				let user = crate::InteropAddress::new_ethereum(
 					self.input_chain_id,
-					self.signed_order.permit.owner.into(),
+					self.signed_order.permit().owner.into(),
 				);
 
 				AvailableInput {
@@ -436,7 +436,7 @@ impl OrderParsable for SignetOrderData {
 	fn parse_requested_outputs(&self) -> Vec<RequestedOutput> {
 		// Parse outputs from the signed order
 		self.signed_order
-			.outputs
+			.outputs()
 			.iter()
 			.map(|output| {
 				let asset = crate::InteropAddress::new_ethereum(

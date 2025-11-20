@@ -77,27 +77,27 @@ token_d = "0x897afeae2AB0b372E8f23f281005360792d05b93"
 
 # Routing Configuration
 max_routing_hops = 2
-slippage_tolerance_bps = 100  # 1%
+slippage_tolerance_bps = 1000 # 10%
 default_fee_tier = 0          # 0% (for testing)
 tick_spacing = 60             # Tick spacing for pools
 
 # Pool Information (hardcoded for demo scenario)
 # C/D Pool: 1C = 2D
 [[delivery.implementations.signet_bundle.dex.pools]]
-token0 = "0x1Cba8B73D2B655FE0f6af733873dA09328FF4d99"  # Token C
-token1 = "0x897afeae2AB0b372E8f23f281005360792d05b93"  # Token D
+token0 = "0x1Cba8B73D2B655FE0f6af733873dA09328FF4d99" # Token C
+token1 = "0x897afeae2AB0b372E8f23f281005360792d05b93" # Token D
 price_ratio = "2.0"
 
 # D/B Pool: 1D = 0.55B
 [[delivery.implementations.signet_bundle.dex.pools]]
-token0 = "0x897afeae2AB0b372E8f23f281005360792d05b93"  # Token D
-token1 = "0xbDD57Be55e6aF632A078397234ACd8B16ffBfd53"  # Token B
+token0 = "0x897afeae2AB0b372E8f23f281005360792d05b93" # Token D
+token1 = "0xbDD57Be55e6aF632A078397234ACd8B16ffBfd53" # Token B
 price_ratio = "0.55"
 
 # A/C Pool: 1A = 1C
 [[delivery.implementations.signet_bundle.dex.pools]]
-token0 = "0x1Cba8B73D2B655FE0f6af733873dA09328FF4d99"  # Token C
-token1 = "0x3bfcDbd4C8EA35Acc2576b1E171b34bb460F4B86"  # Token A
+token0 = "0x1Cba8B73D2B655FE0f6af733873dA09328FF4d99" # Token C
+token1 = "0x3bfcDbd4C8EA35Acc2576b1E171b34bb460F4B86" # Token A
 price_ratio = "1.0"
 
 # ============================================================================

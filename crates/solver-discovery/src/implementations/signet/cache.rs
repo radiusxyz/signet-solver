@@ -96,7 +96,7 @@ impl SignetCacheDiscovery {
 	/// Converts a Signed Order to an Intent.
 	fn order_to_intent(order: &SignedOrder) -> Result<Intent, DiscoveryError> {
 		// Generate a simple ID from permit nonce
-		let id = format!("signet-{}", order.permit.permit.nonce);
+		let id = format!("signet-{}", order.permit().permit.nonce);
 
 		// Create intent with Permit2 data (SignedOrder)
 		let data = serde_json::to_value(order)
@@ -129,7 +129,7 @@ impl SignetCacheDiscovery {
 			None => true, // No whitelist = accept all
 			Some(addresses) => {
 				// Get the owner address from the order
-				let owner = order.permit.owner;
+				let owner = order.permit().owner;
 
 				// Check if the owner is in the whitelist (case-insensitive comparison)
 				addresses.iter().any(|addr| {
@@ -177,13 +177,14 @@ impl SignetCacheDiscovery {
 		loop {
 			tokio::select! {
 				_ = interval.tick() => {
-					match client.get_orders().await {
-						Ok(orders) => {
+					match client.get_orders(None).await {
+						Ok(orders_response) => {
+							let orders: Vec<SignedOrder> = orders_response.inner().orders.clone();
 							tracing::debug!("Fetched {} orders from Signet cache", orders.len());
 
 							for order in orders {
 								// Generate intent ID to check if already processed
-								let intent_id = format!("signet-{}", order.permit.permit.nonce);
+								let intent_id = format!("signet-{}", order.permit().permit.nonce);
 
 								// Skip if already processed
 								if processed_orders.contains(&intent_id) {
