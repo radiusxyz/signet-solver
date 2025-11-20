@@ -45,6 +45,10 @@ pub struct Options {
 	/// Builder RPC (eth_sendBundle) endpoint for host-chain bundles
 	#[arg(long, default_value = "https://host-builder-rpc.pecorino.signet.sh")]
 	pub builder_rpc: String,
+
+	/// How many host blocks ahead to target when sending the bundle
+	#[arg(long, default_value_t = 1)]
+	pub bundle_block_offset: u64,
 }
 
 fn resolve_config_path(path: &Path) -> Result<PathBuf> {
@@ -279,7 +283,7 @@ pub async fn run() -> Result<()> {
 							.get_block_number()
 							.await
 							.context("Failed to fetch latest host block number")?;
-						let target_block = latest_block + 1;
+						let target_block = latest_block + options.bundle_block_offset.max(1);
 						info!(
 							%order_id,
 							target_block,
