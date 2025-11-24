@@ -14,7 +14,7 @@ signet-types = { git = "https://github.com/init4tech/signet-sdk", branch = "main
 tokio = { version = "1.40", features = ["macros", "rt-multi-thread"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
-alloy-network = "1.0"
+alloy-network = "1.1"
 alloy-provider = "1.0"
 alloy-primitives = "1.0"
 serde_json = "1.0"
